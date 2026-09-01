@@ -218,6 +218,22 @@ function getTitleInfo(totalMs) {
     return { rank: "d", name: "💤 うんち初心者" };
 }
 
+// カウントダウン共通関数（れでぃ？ → ごー！）
+function startCountdown(wordElement, onComplete) {
+    setWordTextWithAnimation(wordElement, "れでぃ？");
+    playSound("word");
+
+    window.setTimeout(() => {
+        setWordTextWithAnimation(wordElement, "ごー！");
+        playSound("correct");
+
+        window.setTimeout(() => {
+            setWordTextWithAnimation(wordElement, "");
+            if (onComplete) onComplete();
+        }, 600);
+    }, 800);
+}
+
 // ========================================
 // ひとりであそぶ
 // ========================================
@@ -252,7 +268,8 @@ function createSingleState() {
         waitingForCorrectTap: false,
         wordIsActive: false,
         finished: false,
-        isPaused: false,
+        isPaused: true, // スタートカウントダウン中は操作停止
+        isCountingDown: true,
         elapsedTimerAnimId: null
     };
 }
@@ -293,7 +310,6 @@ function startSinglePlay() {
     stopSinglePlay();
     singleState = createSingleState();
     resetFeedback(singleEls.feedback, singleEls.stage);
-    setWordTextWithAnimation(singleEls.wordText, "");
     renderSingleRoundChips();
 
     if (singleEls.wordElapsed) {
@@ -301,12 +317,19 @@ function startSinglePlay() {
     }
 
     showScreen("single");
-    scheduleSingleWord();
-    updateWordElapsedDisplay();
+
+    // 開始時のカウントダウン表示（れでぃ？ → ごー！）
+    startCountdown(singleEls.wordText, () => {
+        if (!singleState) return;
+        singleState.isCountingDown = false;
+        singleState.isPaused = false;
+        scheduleSingleWord();
+        updateWordElapsedDisplay();
+    });
 }
 
 function scheduleSingleWord() {
-    if (!singleState || singleState.finished || singleState.isPaused) return;
+    if (!singleState || singleState.finished || singleState.isPaused || singleState.isCountingDown) return;
 
     const level = SINGLE_LEVEL_PROGRESSION[singleState.roundIndex];
     const interval = pickInterval(level);
@@ -317,7 +340,7 @@ function scheduleSingleWord() {
 }
 
 function showSingleWord(level) {
-    if (!singleState || singleState.finished || singleState.isPaused) return;
+    if (!singleState || singleState.finished || singleState.isPaused || singleState.isCountingDown) return;
 
     if (singleState.wordIsActive && singleState.waitingForCorrectTap && singleState.wordStartedAt > 0) {
         const missedTime = performance.now() - singleState.wordStartedAt;
@@ -338,7 +361,7 @@ function showSingleWord(level) {
 }
 
 function handleSingleTap() {
-    if (!singleState || singleState.finished || singleState.isPaused) return;
+    if (!singleState || singleState.finished || singleState.isPaused || singleState.isCountingDown) return;
 
     const isCorrectTap = singleState.wordIsActive && singleState.waitingForCorrectTap;
 
@@ -838,10 +861,12 @@ function enterRoomWaitScreen() {
     renderRoomQrCode(multi.roomId);
     showScreen("roomWait");
 
+    // 全員のスコアと参加者を常時リスニング
     multiWatch(`rooms/${multi.roomId}/players`, (snapshot) => {
         const players = snapshot.val() || {};
         multi.lastPlayersData = { ...players };
         renderRoomWaitPlayers(players);
+        renderMultiScoreboard(multiPlayEls.scoreboard, players);
         checkAndUpdateHost(players);
     });
 
@@ -883,7 +908,8 @@ function watchAutoStart() {
             });
 
             if (result.committed) {
-                startNextMultiScoreRound();
+                // 初回カウントダウン（れでぃ？ → ごー！）を起動
+                triggerMultiStartCountdown();
             }
         } catch (err) {
             console.warn("自動開始処理に失敗しました", err);
@@ -931,8 +957,13 @@ function enterMultiPlayScreen() {
     resetFeedback(multiPlayEls.feedback, multiPlayEls.stage);
     setWordTextWithAnimation(multiPlayEls.wordText, "");
     multiPlayEls.penaltyText.textContent = "";
-    showScreen("multiPlay");
 
+    // 画面入出時に確実に現在のスコアボードを描画
+    if (multi.lastPlayersData) {
+        renderMultiScoreboard(multiPlayEls.scoreboard, multi.lastPlayersData);
+    }
+
+    showScreen("multiPlay");
     updateMultiPenaltyDisplay();
 }
 
@@ -950,6 +981,15 @@ function updateMultiPenaltyDisplay() {
     multi.penaltyAnimFrameId = requestAnimationFrame(updateMultiPenaltyDisplay);
 }
 
+// 全員同期のスタートカウントダウン
+function triggerMultiStartCountdown() {
+    if (!multi.roomId || !multi.isHost) return;
+
+    window.setTimeout(() => {
+        startNextMultiScoreRound();
+    }, 1500); // カウントダウン表示時間（れでぃ？ → ごー！）
+}
+
 // 難易度変更とラウンドのリセット（ポイント獲得時）
 async function startNextMultiScoreRound() {
     if (!multi.roomId || !multi.isHost) return;
@@ -959,7 +999,7 @@ async function startNextMultiScoreRound() {
     scheduleNextMultiWord(newLevel, true);
 }
 
-// ホストによる単語自動更新ループ（「ひとりであそぶ」と同等のテンポ感）
+// ホストによる単語自動更新ループ
 async function scheduleNextMultiWord(level, isNewRound = false) {
     if (!multi.roomId || !multi.isHost) return;
 
@@ -985,9 +1025,8 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
         if (isNewRound) {
             await set(ref(db, `rooms/${multi.roomId}/round`), roundData);
         } else {
-            // 現在のラウンドで未決着の場合のみ単語更新
             await runTransaction(ref(db, `rooms/${multi.roomId}/round`), (current) => {
-                if (!current || current.winnerId) return; // 既に決着済み
+                if (!current || current.winnerId) return;
                 return {
                     ...current,
                     word: word,
@@ -997,7 +1036,6 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
             });
         }
 
-        // ダミー単語だった場合は次のタイマーをセット
         multi.hostLoopTimeoutId = window.setTimeout(() => {
             scheduleNextMultiWord(level, false);
         }, interval);
@@ -1017,7 +1055,7 @@ function handleRoundUpdate(round) {
     const settings = DIFFICULTY_SETTINGS[round.difficultyLevel] || DIFFICULTY_SETTINGS[2];
     multiPlayEls.difficultyBadge.textContent = settings.name;
 
-    // --- 勝者が決定した場合のリアルタイム演出 ---
+    // 勝者が決定した場合（一元制御）
     if (round.winnerId) {
         if (round.winnerId === lastProcessedWinnerId) return;
         lastProcessedWinnerId = round.winnerId;
@@ -1042,7 +1080,6 @@ function handleRoundUpdate(round) {
             );
         }
 
-        // ホストのみが演出後に次ラウンドをトリガー
         if (multi.isHost) {
             window.setTimeout(() => {
                 startNextMultiScoreRound();
@@ -1051,7 +1088,6 @@ function handleRoundUpdate(round) {
         return;
     }
 
-    // --- 単語表示更新 ---
     currentRoundIsCorrectWord = !!round.isCorrect;
     const displayWord = round.word || CORRECT_WORD;
 
@@ -1060,6 +1096,7 @@ function handleRoundUpdate(round) {
 }
 
 function renderMultiScoreboard(targetEl, players) {
+    if (!targetEl) return;
     targetEl.innerHTML = "";
     Object.entries(players)
         .sort((a, b) => (b[1].score || 0) - (a[1].score || 0))
@@ -1071,27 +1108,14 @@ function renderMultiScoreboard(targetEl, players) {
         });
 }
 
-// スコアボードの監視（ルーム作成・参加直後から）
-multiWatch(`rooms/${multi.roomId}/players`, (snapshot) => {
-    const players = snapshot.val() || {};
-    if (Object.keys(players).length > 0) {
-        multi.lastPlayersData = { ...players };
-        checkAndUpdateHost(players);
-    }
-    if (screens.multiPlay.classList.contains("is-active")) {
-        renderMultiScoreboard(multiPlayEls.scoreboard, players);
-    }
-});
-
-// タップイベント（高速レスポンス設計）
+// タップイベント（二重判定・フリーズ完全防御）
 multiPlayEls.wordBlob.addEventListener("click", async () => {
     if (!multi.roomId || !currentRoundId) return;
 
-    // ペナルティ中
     if (Date.now() < multi.penaltyUntil) return;
 
     const currentWordText = multiPlayEls.wordText.textContent;
-    if (!currentWordText) return;
+    if (!currentWordText || currentWordText === "れでぃ？" || currentWordText === "ごー！") return;
 
     const isCorrectTap = currentRoundIsCorrectWord;
 
@@ -1103,22 +1127,21 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
         return;
     }
 
-    // 正解タップ：早押し判定（winnerId のみトランザクション更新）
+    // 正解タップ：アトミックに winnerId を取得権限定で更新
     try {
         const claim = await runTransaction(
-            ref(db, `rooms/${multi.roomId}/round/winnerId`),
+            ref(db, `rooms/${multi.roomId}/round`),
             (current) => {
-                if (current) return; // 既に誰かが獲得済み
-                return multi.playerId;
+                if (!current || current.winnerId) return; // 既に獲得者あり
+                current.winnerId = multi.playerId;
+                current.winnerName = multi.playerName;
+                return current;
             }
         );
 
-        if (!claim.committed) return; // 横取り失敗
+        if (!claim.committed) return; // タップ負け（相手が先）
 
-        // 獲得成功：勝者名を記録
-        await set(ref(db, `rooms/${multi.roomId}/round/winnerName`), multi.playerName);
-
-        // 加点処理
+        // 自プレイヤーのポイント加算
         const scoreResult = await runTransaction(
             ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/score`),
             (current) => (current || 0) + 1
@@ -1126,13 +1149,12 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
 
         const newScore = scoreResult.snapshot.val();
 
-        // 勝利判定
         if (newScore >= WIN_SCORE) {
             await set(ref(db, `rooms/${multi.roomId}/state`), "finished");
             await set(ref(db, `rooms/${multi.roomId}/winner`), multi.playerId);
         }
     } catch (err) {
-        console.warn("正解タップの判定処理に失敗しました", err);
+        console.warn("判定処理に失敗しました", err);
     }
 });
 

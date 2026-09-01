@@ -591,7 +591,7 @@ button {
 .waiting-text { text-align: center; color: var(--color-brown); font-size: 0.82rem; margin: 0; }
 
 /* スコアボード・難易度 */
-.scoreboard { width: 100%; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.scoreboard { width: 100%; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; min-height: 48px; }
 .score-pill {
     flex: 1;
     background: var(--color-bg-soft);

@@ -665,6 +665,7 @@ const multiPlayEls = {
 const multiResultEls = {
     title: document.getElementById("multi-result-title"),
     ranking: document.getElementById("multi-result-ranking"),
+    retryBtn: document.getElementById("btn-multi-retry"),
     toTitleBtn: document.getElementById("btn-multi-result-to-title")
 };
 
@@ -768,7 +769,8 @@ async function createRoom(maxPlayers) {
         await set(ref(db, `rooms/${roomId}/players/${playerId}`), {
             name: playerName,
             score: 0,
-            joinedAt: Date.now()
+            joinedAt: Date.now(),
+            ready: false
         });
 
         onDisconnect(ref(db, `rooms/${roomId}/players/${playerId}`)).remove();
@@ -813,7 +815,8 @@ async function joinRoom(roomId) {
         await set(ref(db, `rooms/${roomId}/players/${playerId}`), {
             name: playerName,
             score: 0,
-            joinedAt: Date.now()
+            joinedAt: Date.now(),
+            ready: false
         });
 
         await runTransaction(ref(db, `rooms/${roomId}/playerCount`), (current) => (current || 0) + 1);
@@ -943,12 +946,11 @@ async function leaveRoom() {
 
 let currentRoundId = null;
 let currentRoundIsCorrectWord = false;
-let lastProcessedWinnerId = null; // 【重要】フリーズ防止用：処理済みの勝者IDを記憶
+let lastProcessedWinnerId = null;
 
 function enterMultiPlayScreen() {
     multi.penaltyUntil = 0;
     
-    // 【重要】新しいゲームが始まるため、履歴をリセット
     currentRoundId = null;
     lastProcessedWinnerId = null; 
     
@@ -962,7 +964,6 @@ function enterMultiPlayScreen() {
     showScreen("multiPlay");
     updateMultiPenaltyDisplay();
 
-    // カウントダウン開始
     startCountdown(multiPlayEls.wordText, () => {
         if (multi.isHost) {
             startNextMultiScoreRound();
@@ -1006,7 +1007,6 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
         const roundIdToSet = isNewRound ? Date.now() : (currentRoundId || Date.now());
 
         if (isNewRound) {
-            // 新規ラウンドのセット
             await set(ref(db, `rooms/${multi.roomId}/round`), {
                 roundId: roundIdToSet,
                 difficultyLevel: level,
@@ -1017,10 +1017,7 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
                 updatedAt: Date.now()
             });
         } else {
-            // 【重要】ワードのブレ・二重出現防止
-            // 3回の連続送信をやめ、トランザクションで1回のアトミックな更新に統合
             await runTransaction(ref(db, `rooms/${multi.roomId}/round`), (current) => {
-                // 既に勝者が決まっている、またはラウンドが変わっている場合は更新しない
                 if (!current || current.winnerId || current.roundId !== roundIdToSet) return;
                 return {
                     ...current,
@@ -1031,7 +1028,6 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
             });
         }
 
-        // 次の単語切り替えタイマーをセット
         multi.hostLoopTimeoutId = window.setTimeout(() => {
             scheduleNextMultiWord(level, false);
         }, interval);
@@ -1044,7 +1040,6 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
 function handleRoundUpdate(round) {
     if (!round) return;
 
-    // 【重要】フリーズ防止：ラウンドが新しくなった時、処理済み勝者の履歴をリセット
     const isRoundChanged = round.roundId !== currentRoundId;
     if (isRoundChanged) {
         currentRoundId = round.roundId;
@@ -1054,9 +1049,7 @@ function handleRoundUpdate(round) {
     const settings = DIFFICULTY_SETTINGS[round.difficultyLevel] || DIFFICULTY_SETTINGS[2];
     multiPlayEls.difficultyBadge.textContent = settings.name;
 
-    // --- 勝者が決定した場合の処理（一元管理） ---
     if (round.winnerId) {
-        // 同じ勝者判定を2回処理しないためのブロック
         if (round.winnerId === lastProcessedWinnerId) return;
         lastProcessedWinnerId = round.winnerId;
 
@@ -1065,7 +1058,6 @@ function handleRoundUpdate(round) {
             multi.hostLoopTimeoutId = null;
         }
 
-        // 判定結果を画面に出力
         if (round.winnerId === multi.playerId) {
             playSound("correct");
             triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "good", "〇 せいかい！");
@@ -1081,7 +1073,6 @@ function handleRoundUpdate(round) {
             );
         }
 
-        // ホストのみが、2秒間の演出待機後にゲームを進行させる
         if (multi.isHost) {
             window.setTimeout(async () => {
                 const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
@@ -1098,7 +1089,6 @@ function handleRoundUpdate(round) {
         return;
     }
 
-    // 単語の表示更新
     currentRoundIsCorrectWord = !!round.isCorrect;
     const displayWord = round.word || CORRECT_WORD;
 
@@ -1130,8 +1120,6 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
 
     const isCorrectTap = currentRoundIsCorrectWord;
 
-    // 【重要】フライング「せいかい」の廃止
-    // タップした瞬間に「単語を消すだけ」に留め、誰が1番だったかはFirebaseの判定に委ねる
     setWordTextWithAnimation(multiPlayEls.wordText, "");
 
     if (!isCorrectTap) {
@@ -1153,7 +1141,6 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
         );
 
         if (claim.committed) {
-            // 通信競争に勝利し、先着できた場合のみポイントを加算
             await runTransaction(
                 ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/score`),
                 (current) => (current || 0) + 1
@@ -1164,8 +1151,11 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
     }
 });
 
+// ========================================
+// リザルト画面＆再戦（待機・10秒タイマー・離脱連携）
+// ========================================
+
 function enterMultiResultScreen() {
-    multiUnwatchAll();
     playSound("win");
 
     multiResultEls.ranking.innerHTML = "";
@@ -1190,13 +1180,158 @@ function enterMultiResultScreen() {
         multiResultEls.ranking.appendChild(li);
     });
 
+    // 自分の ready 状態をリセット
+    if (multi.roomId && multi.playerId) {
+        set(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/ready`), false);
+    }
+
     showScreen("multiResult");
+    updateRetryButtonUI(false, 0);
+
+    // リザルト中の部屋・プレイヤー・タイマー状態監視
+    attachResultRoomWatcher();
+}
+
+function updateRetryButtonUI(isReady, remainingSec) {
+    if (isReady) {
+        multiResultEls.retryBtn.textContent = `キャンセル (待機中 ${remainingSec}s)`;
+        multiResultEls.retryBtn.classList.remove("btn-main");
+        multiResultEls.retryBtn.classList.add("btn-sub-wide");
+    } else {
+        multiResultEls.retryBtn.textContent = "もう一度あそぶ";
+        multiResultEls.retryBtn.classList.remove("btn-sub-wide");
+        multiResultEls.retryBtn.classList.add("btn-main");
+    }
+}
+
+function attachResultRoomWatcher() {
+    // プレイヤー変更監視（全員離脱検知 & ready状態チェック）
+    multiWatch(`rooms/${multi.roomId}/players`, async (snapshot) => {
+        const players = snapshot.val() || {};
+        const playerKeys = Object.keys(players);
+
+        // 自分以外のプレイヤーが全員退出した場合、強制タイトルへ
+        if (playerKeys.length === 0 || (playerKeys.length === 1 && playerKeys[0] !== multi.playerId)) {
+            leaveRoom();
+            return;
+        }
+
+        multi.lastPlayersData = { ...players };
+        checkAndUpdateHost(players);
+
+        // 残存プレイヤー全員が ready になった場合（即時スタート）
+        const allReady = playerKeys.length > 0 && playerKeys.every(k => players[k].ready === true);
+        if (allReady && multi.isHost) {
+            startMultiGameAgain();
+        }
+    });
+
+    // タイマー監視（10秒タイマーカウントダウン）
+    multiWatch(`rooms/${multi.roomId}/retryTimerEnd`, (snapshot) => {
+        const timerEnd = snapshot.val();
+        if (!timerEnd) {
+            // タイマー解除時
+            const me = multi.lastPlayersData[multi.playerId];
+            updateRetryButtonUI(me?.ready || false, 0);
+            return;
+        }
+
+        const intervalId = window.setInterval(async () => {
+            const now = Date.now();
+            const remaining = Math.max(0, Math.ceil((timerEnd - now) / 1000));
+            const me = multi.lastPlayersData[multi.playerId];
+
+            if (me?.ready) {
+                updateRetryButtonUI(true, remaining);
+            } else {
+                updateRetryButtonUI(false, 0);
+            }
+
+            // タイマーが0になった場合
+            if (remaining <= 0) {
+                window.clearInterval(intervalId);
+                if (multi.isHost) {
+                    const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
+                    const players = playersSnap.val() || {};
+                    
+                    // readyでないプレイヤーをルームから除外
+                    for (const [pId, pData] of Object.entries(players)) {
+                        if (!pData.ready) {
+                            await remove(ref(db, `rooms/${multi.roomId}/players/${pId}`));
+                        }
+                    }
+
+                    // 1人以上準備完了者が残っていればスタート
+                    const updatedSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
+                    const updatedPlayers = updatedSnap.val() || {};
+                    if (Object.keys(updatedPlayers).length > 0) {
+                        startMultiGameAgain();
+                    }
+                }
+            }
+        }, 200);
+
+        multi.listeners.push({ ref: null, callback: () => window.clearInterval(intervalId) });
+    });
+}
+
+// 「もう一度あそぶ」/「キャンセル」トグルイベント
+multiResultEls.retryBtn.addEventListener("click", async () => {
+    if (!multi.roomId || !multi.playerId) return;
+
+    const me = multi.lastPlayersData[multi.playerId];
+    const isCurrentlyReady = me?.ready || false;
+    const nextReadyState = !isCurrentlyReady;
+
+    try {
+        await set(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/ready`), nextReadyState);
+
+        // 自分が最初の1人として「もう一度あそぶ」を押した場合、10秒タイマーを開始
+        const timerSnap = await get(ref(db, `rooms/${multi.roomId}/retryTimerEnd`));
+        if (nextReadyState && !timerSnap.val()) {
+            const endTime = Date.now() + 10000; // 10秒後
+            await set(ref(db, `rooms/${multi.roomId}/retryTimerEnd`), endTime);
+        } else if (!nextReadyState) {
+            // 全員がキャンセル状態になったかチェックし、誰もおらなければタイマーリセット
+            const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
+            const players = playersSnap.val() || {};
+            const anyReady = Object.values(players).some(p => p.ready && pId !== multi.playerId);
+            if (!anyReady) {
+                await remove(ref(db, `rooms/${multi.roomId}/retryTimerEnd`));
+            }
+        }
+    } catch (err) {
+        console.warn("再戦状態更新に失敗しました", err);
+    }
+});
+
+// ゲーム再スタート処理
+async function startMultiGameAgain() {
+    if (!multi.roomId) return;
+    try {
+        await remove(ref(db, `rooms/${multi.roomId}/retryTimerEnd`));
+        const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
+        const players = playersSnap.val() || {};
+
+        // 全プレイヤーのスコアとready状態をリセット
+        for (const pId of Object.keys(players)) {
+            await set(ref(db, `rooms/${multi.roomId}/players/${pId}/score`), 0);
+            await set(ref(db, `rooms/${multi.roomId}/players/${pId}/ready`), false);
+        }
+
+        await set(ref(db, `rooms/${multi.roomId}/state`), "playing");
+    } catch (err) {
+        console.warn("再戦スタートに失敗しました", err);
+    }
 }
 
 multiResultEls.toTitleBtn.addEventListener("click", async () => {
     if (multi.roomId && multi.playerId) {
         try {
             await remove(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}`));
+            await runTransaction(ref(db, `rooms/${multi.roomId}/playerCount`), (current) =>
+                Math.max((current || 1) - 1, 0)
+            );
         } catch (err) {}
     }
     multiUnwatchAll();

@@ -56,7 +56,8 @@
             </div>
 
             <div class="game-footer">
-                <div class="total-time" id="single-total-time">合計タイム：0.00秒</div>
+                <!-- ワード登場からのリアルタイム経過表示（タップ時は固定表示） -->
+                <div class="word-elapsed-time" id="single-word-elapsed">単語経過: 0.00秒</div>
                 <button id="btn-single-quit" class="btn btn-sub">やめる</button>
             </div>
         </section>
@@ -71,7 +72,7 @@
 
             <div class="result-total" id="single-result-total">0.00秒</div>
             
-            <!-- FEAT-001: 称号表示用バッジ -->
+            <!-- 称号表示用バッジ -->
             <div id="single-result-title-badge" class="title-badge is-hidden"></div>
 
             <div class="result-detail" id="single-result-detail"></div>
@@ -140,9 +141,10 @@
                 <div class="word-blob" id="multi-word-blob">
                     <span class="word-text" id="multi-word-text"></span>
                 </div>
+                <div class="multi-penalty-text" id="multi-penalty-text"></div>
             </div>
 
-            <div class="difficulty-badge" id="multi-difficulty-badge">EASY</div>
+            <div class="difficulty-badge" id="multi-difficulty-badge">NORMAL</div>
         </section>
 
         <!-- ============================
@@ -150,7 +152,9 @@
         ============================= -->
         <section id="screen-multi-result" class="screen">
             <h2 class="result-title" id="multi-result-title">けっか発表！</h2>
-            <div class="scoreboard" id="multi-result-scoreboard"></div>
+            
+            <p class="field-label">最終順位・ポイント</p>
+            <ol class="multi-result-ranking" id="multi-result-ranking"></ol>
 
             <div class="menu">
                 <button id="btn-multi-result-to-title" class="btn btn-main">タイトルへ</button>
@@ -197,5 +201,3 @@
     <script type="module" src="script.js"></script>
 </body>
 </html>
-
-

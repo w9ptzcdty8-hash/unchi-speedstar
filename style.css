@@ -547,6 +547,34 @@ button {
     width: 100%;
 }
 
+.room-qr-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    margin: 12px 0;
+}
+.room-qr {
+    display: inline-flex;
+    padding: 10px;
+    background: #ffffff;
+    border-radius: 12px;
+    border: 2px solid var(--color-bg-soft);
+    line-height: 0;
+}
+.room-qr img,
+.room-qr canvas {
+    display: block;
+    width: 140px;
+    height: 140px;
+}
+.room-qr-caption {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--color-brown);
+    margin: 0;
+}
+
 .room-players { width: 100%; display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
 .room-player-row {
     display: flex;

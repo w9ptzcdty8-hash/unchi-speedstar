@@ -816,8 +816,34 @@ async function joinRoom(roomId) {
     }
 }
 
+function renderRoomQrCode(roomId) {
+    const container = document.getElementById("room-qr");
+    if (!container) return;
+    container.innerHTML = ""; // 再入室時などの重複描画を防ぐ
+
+    if (typeof QRCode === "undefined") {
+        console.warn("QRコードライブラリの読み込みに失敗しました");
+        return;
+    }
+
+    const joinUrl = `${location.origin}${location.pathname}?room=${roomId}`;
+    try {
+        new QRCode(container, {
+            text: joinUrl,
+            width: 140,
+            height: 140,
+            colorDark: "#3A2C1D",
+            colorLight: "#ffffff",
+            correctLevel: QRCode.CorrectLevel.M
+        });
+    } catch (err) {
+        console.warn("QRコードの生成に失敗しました", err);
+    }
+}
+
 function enterRoomWaitScreen() {
     roomWaitEls.idDisplay.textContent = multi.roomId;
+    renderRoomQrCode(multi.roomId);
     showScreen("roomWait");
 
     multiWatch(`rooms/${multi.roomId}/players`, (snapshot) => {
@@ -1163,9 +1189,28 @@ multiResultEls.toTitleBtn.addEventListener("click", async () => {
 // 初期化
 // ========================================
 
+function applyRoomIdFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const roomIdFromUrl = params.get("room");
+    if (!roomIdFromUrl) return;
+
+    const normalized = roomIdFromUrl.trim().toUpperCase().slice(0, 6);
+
+    multiSetupEls.errorText.classList.add("is-hidden");
+    const stored = getStoredPlayerName();
+    if (stored) multiSetupEls.nameInput.value = stored;
+    multiSetupEls.roomIdInput.value = normalized;
+    showScreen("multiSetup");
+
+    // URLをきれいにする（履歴には残さない）
+    const cleanUrl = location.origin + location.pathname;
+    history.replaceState(null, "", cleanUrl);
+}
+
 function init() {
     console.log("うんちスピードスター initialized");
     showScreen("title");
+    applyRoomIdFromUrl();
 }
 
 document.addEventListener("DOMContentLoaded", init);

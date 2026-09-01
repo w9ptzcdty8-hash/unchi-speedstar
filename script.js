@@ -268,7 +268,7 @@ function createSingleState() {
         waitingForCorrectTap: false,
         wordIsActive: false,
         finished: false,
-        isPaused: true, // スタートカウントダウン中は操作停止
+        isPaused: true,
         isCountingDown: true,
         elapsedTimerAnimId: null
     };
@@ -318,7 +318,6 @@ function startSinglePlay() {
 
     showScreen("single");
 
-    // 開始時のカウントダウン表示（れでぃ？ → ごー！）
     startCountdown(singleEls.wordText, () => {
         if (!singleState) return;
         singleState.isCountingDown = false;
@@ -861,7 +860,6 @@ function enterRoomWaitScreen() {
     renderRoomQrCode(multi.roomId);
     showScreen("roomWait");
 
-    // 全員のスコアと参加者を常時リスニング
     multiWatch(`rooms/${multi.roomId}/players`, (snapshot) => {
         const players = snapshot.val() || {};
         multi.lastPlayersData = { ...players };
@@ -908,7 +906,6 @@ function watchAutoStart() {
             });
 
             if (result.committed) {
-                // 初回カウントダウン（れでぃ？ → ごー！）を起動
                 triggerMultiStartCountdown();
             }
         } catch (err) {
@@ -958,7 +955,6 @@ function enterMultiPlayScreen() {
     setWordTextWithAnimation(multiPlayEls.wordText, "");
     multiPlayEls.penaltyText.textContent = "";
 
-    // 画面入出時に確実に現在のスコアボードを描画
     if (multi.lastPlayersData) {
         renderMultiScoreboard(multiPlayEls.scoreboard, multi.lastPlayersData);
     }
@@ -981,25 +977,22 @@ function updateMultiPenaltyDisplay() {
     multi.penaltyAnimFrameId = requestAnimationFrame(updateMultiPenaltyDisplay);
 }
 
-// 全員同期のスタートカウントダウン
 function triggerMultiStartCountdown() {
     if (!multi.roomId || !multi.isHost) return;
 
     window.setTimeout(() => {
         startNextMultiScoreRound();
-    }, 1500); // カウントダウン表示時間（れでぃ？ → ごー！）
+    }, 1500);
 }
 
-// 難易度変更とラウンドのリセット（ポイント獲得時）
 async function startNextMultiScoreRound() {
     if (!multi.roomId || !multi.isHost) return;
 
-    const newLevel = Math.floor(Math.random() * 3) + 2; // 2(NORMAL)〜4(CHAOS)
+    const newLevel = Math.floor(Math.random() * 3) + 2;
     await set(ref(db, `rooms/${multi.roomId}/currentDifficulty`), newLevel);
     scheduleNextMultiWord(newLevel, true);
 }
 
-// ホストによる単語自動更新ループ
 async function scheduleNextMultiWord(level, isNewRound = false) {
     if (!multi.roomId || !multi.isHost) return;
 
@@ -1012,28 +1005,26 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
     const interval = pickInterval(level);
 
     try {
-        const roundData = {
-            roundId: isNewRound ? Date.now() : (currentRoundId || Date.now()),
-            difficultyLevel: level,
-            word: word,
-            isCorrect: isCorrect,
-            winnerId: null,
-            winnerName: null,
-            updatedAt: Date.now()
-        };
+        const roundIdToSet = isNewRound ? Date.now() : (currentRoundId || Date.now());
 
         if (isNewRound) {
-            await set(ref(db, `rooms/${multi.roomId}/round`), roundData);
-        } else {
-            await runTransaction(ref(db, `rooms/${multi.roomId}/round`), (current) => {
-                if (!current || current.winnerId) return;
-                return {
-                    ...current,
-                    word: word,
-                    isCorrect: isCorrect,
-                    updatedAt: Date.now()
-                };
+            await set(ref(db, `rooms/${multi.roomId}/round`), {
+                roundId: roundIdToSet,
+                difficultyLevel: level,
+                word: word,
+                isCorrect: isCorrect,
+                winnerId: null,
+                winnerName: null,
+                updatedAt: Date.now()
             });
+        } else {
+            // 現在の単語のみをシンプルにセット（競合防止）
+            const snap = await get(ref(db, `rooms/${multi.roomId}/round/winnerId`));
+            if (!snap.val()) {
+                await set(ref(db, `rooms/${multi.roomId}/round/word`), word);
+                await set(ref(db, `rooms/${multi.roomId}/round/isCorrect`), isCorrect);
+                await set(ref(db, `rooms/${multi.roomId}/round/updatedAt`), Date.now());
+            }
         }
 
         multi.hostLoopTimeoutId = window.setTimeout(() => {
@@ -1045,7 +1036,6 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
     }
 }
 
-// 単語・ラウンド受信時の処理
 function handleRoundUpdate(round) {
     if (!round) return;
 
@@ -1055,7 +1045,7 @@ function handleRoundUpdate(round) {
     const settings = DIFFICULTY_SETTINGS[round.difficultyLevel] || DIFFICULTY_SETTINGS[2];
     multiPlayEls.difficultyBadge.textContent = settings.name;
 
-    // 勝者が決定した場合（一元制御）
+    // --- 勝者が決定した場合の一元処理 ---
     if (round.winnerId) {
         if (round.winnerId === lastProcessedWinnerId) return;
         lastProcessedWinnerId = round.winnerId;
@@ -1080,9 +1070,18 @@ function handleRoundUpdate(round) {
             );
         }
 
+        // ホストがスコアのチェックと次ラウンド／終了画面への進行を制御
         if (multi.isHost) {
-            window.setTimeout(() => {
-                startNextMultiScoreRound();
+            window.setTimeout(async () => {
+                const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
+                const playersData = playersSnap.val() || {};
+                const hasWinner = Object.values(playersData).some((p) => (p.score || 0) >= WIN_SCORE);
+
+                if (hasWinner) {
+                    await set(ref(db, `rooms/${multi.roomId}/state`), "finished");
+                } else {
+                    startNextMultiScoreRound();
+                }
             }, EFFECT_WAIT_MS);
         }
         return;
@@ -1108,7 +1107,7 @@ function renderMultiScoreboard(targetEl, players) {
         });
 }
 
-// タップイベント（二重判定・フリーズ完全防御）
+// 即時レスポンス＆アトミック判定の決定版ロジック
 multiPlayEls.wordBlob.addEventListener("click", async () => {
     if (!multi.roomId || !currentRoundId) return;
 
@@ -1120,38 +1119,33 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
     const isCorrectTap = currentRoundIsCorrectWord;
 
     if (!isCorrectTap) {
-        // お手つき：5秒タップ禁止
         multi.penaltyUntil = Date.now() + 5000;
         playSound("miss");
         triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "bad", "✕ お手つき！(5秒ストップ)");
         return;
     }
 
-    // 正解タップ：アトミックに winnerId を取得権限定で更新
+    // 1. まず自画面で最速レスポンス（演出）を即座に出す
+    playSound("correct");
+    triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "good", "〇 せいかい！");
+
+    // 2. 最軽量の winnerId フィールドのみをアトミックに獲得申請
     try {
         const claim = await runTransaction(
-            ref(db, `rooms/${multi.roomId}/round`),
+            ref(db, `rooms/${multi.roomId}/round/winnerId`),
             (current) => {
-                if (!current || current.winnerId) return; // 既に獲得者あり
-                current.winnerId = multi.playerId;
-                current.winnerName = multi.playerName;
-                return current;
+                if (current) return; // 既に獲得者あり
+                return multi.playerId;
             }
         );
 
-        if (!claim.committed) return; // タップ負け（相手が先）
-
-        // 自プレイヤーのポイント加算
-        const scoreResult = await runTransaction(
-            ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/score`),
-            (current) => (current || 0) + 1
-        );
-
-        const newScore = scoreResult.snapshot.val();
-
-        if (newScore >= WIN_SCORE) {
-            await set(ref(db, `rooms/${multi.roomId}/state`), "finished");
-            await set(ref(db, `rooms/${multi.roomId}/winner`), multi.playerId);
+        if (claim.committed) {
+            // 先着成功：勝者名とスコア加算の書き込み
+            await set(ref(db, `rooms/${multi.roomId}/round/winnerName`), multi.playerName);
+            await runTransaction(
+                ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/score`),
+                (current) => (current || 0) + 1
+            );
         }
     } catch (err) {
         console.warn("判定処理に失敗しました", err);

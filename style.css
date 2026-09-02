@@ -383,6 +383,22 @@ button {
     100% { transform: translate(-50%, -50%) scale(0.8); opacity: 0; }
 }
 
+/* 判定中バッジ（反応時間を送信〜勝敗確定までの待機表示） */
+.feedback-badge.badge-pending {
+    color: #4A63E7;
+    font-size: clamp(1.05rem, 4.2vw, 1.5rem);
+    background: rgba(255, 255, 255, 0.95);
+    padding: 8px 18px;
+    border-radius: 16px;
+    box-shadow: 0 6px 18px rgba(74, 99, 231, 0.3);
+    border: 3px solid #4A63E7;
+    animation: popPending 0.25s ease-out forwards;
+}
+@keyframes popPending {
+    0% { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
+    100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+
 .shake-stage {
     animation: stageShake 0.28s ease-in-out;
 }

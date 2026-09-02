@@ -153,19 +153,24 @@ function resetFeedback(feedbackBadgeEl, stageEl) {
 }
 
 function triggerFeedback(overlayEl, feedbackBadgeEl, stageEl, type, customText = "") {
-    overlayEl.classList.remove("flash-good", "flash-bad");
-    void overlayEl.offsetWidth;
-    overlayEl.classList.add(type === "good" ? "flash-good" : "flash-bad");
-    window.setTimeout(() => {
+    if (type === "good" || type === "bad") {
         overlayEl.classList.remove("flash-good", "flash-bad");
-    }, 220);
+        void overlayEl.offsetWidth;
+        overlayEl.classList.add(type === "good" ? "flash-good" : "flash-bad");
+        window.setTimeout(() => {
+            overlayEl.classList.remove("flash-good", "flash-bad");
+        }, 220);
+    }
 
     if (feedbackBadgeEl) {
-        feedbackBadgeEl.classList.remove("badge-good", "badge-bad");
+        feedbackBadgeEl.classList.remove("badge-good", "badge-bad", "badge-pending");
         void feedbackBadgeEl.offsetWidth;
         if (type === "good") {
             feedbackBadgeEl.textContent = customText || "〇せいかい";
             feedbackBadgeEl.classList.add("badge-good");
+        } else if (type === "pending") {
+            feedbackBadgeEl.textContent = customText || "⏳ はんてい中…";
+            feedbackBadgeEl.classList.add("badge-pending");
         } else {
             feedbackBadgeEl.textContent = customText || "✕ お手つき！";
             feedbackBadgeEl.classList.add("badge-bad");
@@ -627,6 +632,13 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+function joinNames(names) {
+    if (!names || names.length === 0) return "";
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names.join("と");
+    return names.slice(0, -1).join("・") + "と" + names[names.length - 1];
+}
+
 document.getElementById("btn-goto-highscore").addEventListener("click", () => {
     renderHighscoreScreen();
     showScreen("highscore");
@@ -681,6 +693,7 @@ let multi = {
     penaltyUntil: 0,
     penaltyAnimFrameId: null,
     hostLoopTimeoutId: null,
+    retryIntervalId: null, // 【修正】10秒タイマー専用のID管理
     lastPlayersData: {}
 };
 
@@ -691,7 +704,10 @@ function multiWatch(path, callback) {
 }
 
 function multiUnwatchAll() {
-    multi.listeners.forEach(({ ref: r, callback }) => off(r, "value", callback));
+    multi.listeners.forEach(({ ref: r, callback }) => {
+        if (r) off(r, "value", callback);
+        if (typeof callback === "function") callback(); // タイマー解除関数などの実行
+    });
     multi.listeners = [];
     if (multi.hostLoopTimeoutId) {
         window.clearTimeout(multi.hostLoopTimeoutId);
@@ -700,6 +716,10 @@ function multiUnwatchAll() {
     if (multi.penaltyAnimFrameId) {
         cancelAnimationFrame(multi.penaltyAnimFrameId);
         multi.penaltyAnimFrameId = null;
+    }
+    if (multi.retryIntervalId) {
+        window.clearInterval(multi.retryIntervalId);
+        multi.retryIntervalId = null;
     }
 }
 
@@ -947,12 +967,18 @@ async function leaveRoom() {
 let currentRoundId = null;
 let currentRoundIsCorrectWord = false;
 let lastProcessedWinnerId = null;
+let currentWordId = null;
+let wordShownAtLocal = 0;
+let hasSubmittedTapForWord = false;
 
 function enterMultiPlayScreen() {
     multi.penaltyUntil = 0;
     
     currentRoundId = null;
-    lastProcessedWinnerId = null; 
+    lastProcessedWinnerId = null;
+    currentWordId = null;
+    hasSubmittedTapForWord = false;
+    wordShownAtLocal = 0;
     
     resetFeedback(multiPlayEls.feedback, multiPlayEls.stage);
     multiPlayEls.penaltyText.textContent = "";
@@ -1002,18 +1028,21 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
 
     const { word, isCorrect } = pickWord(level);
     const interval = pickInterval(level);
+    const wordIdToSet = Date.now();
 
     try {
-        const roundIdToSet = isNewRound ? Date.now() : (currentRoundId || Date.now());
+        const roundIdToSet = isNewRound ? wordIdToSet : (currentRoundId || wordIdToSet);
 
         if (isNewRound) {
             await set(ref(db, `rooms/${multi.roomId}/round`), {
                 roundId: roundIdToSet,
+                wordId: wordIdToSet,
                 difficultyLevel: level,
                 word: word,
                 isCorrect: isCorrect,
                 winnerId: null,
                 winnerName: null,
+                winners: null,
                 updatedAt: Date.now()
             });
         } else {
@@ -1021,6 +1050,7 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
                 if (!current || current.winnerId || current.roundId !== roundIdToSet) return;
                 return {
                     ...current,
+                    wordId: wordIdToSet,
                     word: word,
                     isCorrect: isCorrect,
                     updatedAt: Date.now()
@@ -1028,12 +1058,71 @@ async function scheduleNextMultiWord(level, isNewRound = false) {
             });
         }
 
-        multi.hostLoopTimeoutId = window.setTimeout(() => {
-            scheduleNextMultiWord(level, false);
+        multi.hostLoopTimeoutId = window.setTimeout(async () => {
+            let decided = false;
+            if (isCorrect) {
+                decided = await judgeCorrectWordTaps(roundIdToSet, wordIdToSet);
+            }
+            if (!decided) {
+                scheduleNextMultiWord(level, false);
+            }
         }, interval);
 
     } catch (err) {
         console.warn("マルチワード進行に失敗しました", err);
+    }
+}
+
+async function judgeCorrectWordTaps(roundId, wordId) {
+    if (!multi.roomId || !multi.isHost) return false;
+
+    try {
+        const tapsSnap = await get(ref(db, `rooms/${multi.roomId}/roundTaps/${wordId}`));
+        const tapsData = tapsSnap.val();
+
+        remove(ref(db, `rooms/${multi.roomId}/roundTaps/${wordId}`)).catch(() => {});
+
+        if (!tapsData) return false;
+
+        let bestTime = Infinity;
+        Object.values(tapsData).forEach((ms) => {
+            if (typeof ms === "number" && ms < bestTime) bestTime = ms;
+        });
+
+        const winnerIds = Object.entries(tapsData)
+            .filter(([, ms]) => ms === bestTime)
+            .map(([id]) => id);
+
+        if (winnerIds.length === 0) return false;
+
+        const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
+        const playersData = playersSnap.val() || {};
+
+        const winners = winnerIds.map((id) => ({
+            id,
+            name: (playersData[id] && playersData[id].name) || "プレイヤー"
+        }));
+
+        await Promise.all(
+            winnerIds.map((id) =>
+                runTransaction(ref(db, `rooms/${multi.roomId}/players/${id}/score`), (current) => (current || 0) + 1)
+            )
+        );
+
+        await runTransaction(ref(db, `rooms/${multi.roomId}/round`), (current) => {
+            if (!current || current.winnerId || current.roundId !== roundId) return;
+            return {
+                ...current,
+                winnerId: winners[0].id,
+                winnerName: winners.map((w) => w.name).join("・"),
+                winners: winners
+            };
+        });
+
+        return true;
+    } catch (err) {
+        console.warn("判定処理に失敗しました", err);
+        return false;
     }
 }
 
@@ -1043,7 +1132,7 @@ function handleRoundUpdate(round) {
     const isRoundChanged = round.roundId !== currentRoundId;
     if (isRoundChanged) {
         currentRoundId = round.roundId;
-        lastProcessedWinnerId = null; 
+        lastProcessedWinnerId = null;
     }
 
     const settings = DIFFICULTY_SETTINGS[round.difficultyLevel] || DIFFICULTY_SETTINGS[2];
@@ -1058,18 +1147,25 @@ function handleRoundUpdate(round) {
             multi.hostLoopTimeoutId = null;
         }
 
-        if (round.winnerId === multi.playerId) {
+        const winners = Array.isArray(round.winners) && round.winners.length > 0
+            ? round.winners
+            : [{ id: round.winnerId, name: round.winnerName || "相手" }];
+
+        const amIWinner = winners.some((w) => w.id === multi.playerId);
+
+        if (amIWinner) {
             playSound("correct");
-            triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "good", "〇 せいかい！");
+            const label = winners.length > 1 ? "〇 せいかい！(同着)" : "〇 せいかい！";
+            triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "good", label);
         } else {
             playSound("miss");
-            const winnerName = round.winnerName || "相手";
+            const names = joinNames(winners.map((w) => w.name));
             triggerFeedback(
                 multiPlayEls.flash,
                 multiPlayEls.feedback,
                 multiPlayEls.stage,
                 "bad",
-                `✕ ${winnerName} にとられた！`
+                `✕ ${names} にとられた！`
             );
         }
 
@@ -1089,7 +1185,14 @@ function handleRoundUpdate(round) {
         return;
     }
 
+    const isNewWord = round.wordId !== currentWordId;
+    if (!isNewWord) return;
+
+    currentWordId = round.wordId;
     currentRoundIsCorrectWord = !!round.isCorrect;
+    hasSubmittedTapForWord = false;
+    wordShownAtLocal = performance.now();
+
     const displayWord = round.word || CORRECT_WORD;
 
     setWordTextWithAnimation(multiPlayEls.wordText, displayWord);
@@ -1109,9 +1212,8 @@ function renderMultiScoreboard(targetEl, players) {
         });
 }
 
-// タップイベント
 multiPlayEls.wordBlob.addEventListener("click", async () => {
-    if (!multi.roomId || !currentRoundId) return;
+    if (!multi.roomId || !currentRoundId || !currentWordId) return;
 
     if (Date.now() < multi.penaltyUntil) return;
 
@@ -1120,40 +1222,47 @@ multiPlayEls.wordBlob.addEventListener("click", async () => {
 
     const isCorrectTap = currentRoundIsCorrectWord;
 
-    setWordTextWithAnimation(multiPlayEls.wordText, "");
-
     if (!isCorrectTap) {
+        setWordTextWithAnimation(multiPlayEls.wordText, "");
         multi.penaltyUntil = Date.now() + 5000;
         playSound("miss");
         triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "bad", "✕ お手つき！(5秒ストップ)");
         return;
     }
 
-    try {
-        const claim = await runTransaction(
-            ref(db, `rooms/${multi.roomId}/round`),
-            (current) => {
-                if (!current || current.winnerId) return; 
-                current.winnerId = multi.playerId;
-                current.winnerName = multi.playerName;
-                return current;
-            }
-        );
+    if (hasSubmittedTapForWord) return;
+    hasSubmittedTapForWord = true;
 
-        if (claim.committed) {
-            await runTransaction(
-                ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/score`),
-                (current) => (current || 0) + 1
-            );
-        }
+    const reactionMs = Math.max(0, Math.round(performance.now() - wordShownAtLocal));
+    const wordIdAtTap = currentWordId;
+
+    triggerFeedback(multiPlayEls.flash, multiPlayEls.feedback, multiPlayEls.stage, "pending", "⏳ はんてい中…");
+
+    try {
+        await set(ref(db, `rooms/${multi.roomId}/roundTaps/${wordIdAtTap}/${multi.playerId}`), reactionMs);
     } catch (err) {
-        console.warn("判定処理に失敗しました", err);
+        console.warn("反応時間の送信に失敗しました", err);
     }
 });
 
 // ========================================
 // リザルト画面＆再戦（待機・10秒タイマー・離脱連携）
 // ========================================
+
+function computeCompetitionRanks(sortedPlayers) {
+    const ranks = [];
+    let prevScore = null;
+    let prevRank = 0;
+    sortedPlayers.forEach(([, p], idx) => {
+        const score = p.score || 0;
+        if (prevScore === null || score !== prevScore) {
+            prevRank = idx + 1;
+            prevScore = score;
+        }
+        ranks.push(prevRank);
+    });
+    return ranks;
+}
 
 function enterMultiResultScreen() {
     playSound("win");
@@ -1162,25 +1271,31 @@ function enterMultiResultScreen() {
     const sortedPlayers = Object.entries(multi.lastPlayersData)
         .sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
 
-    const winnerEntry = sortedPlayers[0];
-    if (winnerEntry) {
-        const [winnerId, winnerData] = winnerEntry;
+    const ranks = computeCompetitionRanks(sortedPlayers);
+    const topWinners = sortedPlayers.filter((_, idx) => ranks[idx] === 1);
+
+    if (topWinners.length === 1) {
+        const [winnerId, winnerData] = topWinners[0];
         multiResultEls.title.textContent =
             winnerId === multi.playerId ? "🎉 あなたの勝ち！" : `🎉 ${winnerData.name} の勝ち！`;
+    } else if (topWinners.length > 1) {
+        const names = topWinners.map(([id, p]) => (id === multi.playerId ? "あなた" : p.name));
+        multiResultEls.title.textContent = `🎉 ${joinNames(names)}の引き分け！`;
+    } else {
+        multiResultEls.title.textContent = "けっか発表！";
     }
 
     sortedPlayers.forEach(([id, p], idx) => {
         const li = document.createElement("li");
-        if (idx === 0) li.classList.add("rank-1");
+        if (ranks[idx] === 1) li.classList.add("rank-1");
         const isMe = id === multi.playerId ? "（あなた）" : "";
         li.innerHTML = `
-            <span>${idx + 1}位: ${escapeHtml(p.name)}${isMe}</span>
+            <span>${ranks[idx]}位: ${escapeHtml(p.name)}${isMe}</span>
             <span class="res-score">${p.score || 0}pt</span>
         `;
         multiResultEls.ranking.appendChild(li);
     });
 
-    // 自分の ready 状態をリセット
     if (multi.roomId && multi.playerId) {
         set(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/ready`), false);
     }
@@ -1188,7 +1303,6 @@ function enterMultiResultScreen() {
     showScreen("multiResult");
     updateRetryButtonUI(false, 0);
 
-    // リザルト中の部屋・プレイヤー・タイマー状態監視
     attachResultRoomWatcher();
 }
 
@@ -1205,12 +1319,14 @@ function updateRetryButtonUI(isReady, remainingSec) {
 }
 
 function attachResultRoomWatcher() {
-    // プレイヤー変更監視（全員離脱検知 & ready状態チェック）
+    // 【修正】古いリスナーを確実にクリーンアップしてから新しく登録
+    multiUnwatchAll();
+
+    // プレイヤー変更監視
     multiWatch(`rooms/${multi.roomId}/players`, async (snapshot) => {
         const players = snapshot.val() || {};
         const playerKeys = Object.keys(players);
 
-        // 自分以外のプレイヤーが全員退出した場合、強制タイトルへ
         if (playerKeys.length === 0 || (playerKeys.length === 1 && playerKeys[0] !== multi.playerId)) {
             leaveRoom();
             return;
@@ -1219,7 +1335,6 @@ function attachResultRoomWatcher() {
         multi.lastPlayersData = { ...players };
         checkAndUpdateHost(players);
 
-        // 残存プレイヤー全員が ready になった場合（即時スタート）
         const allReady = playerKeys.length > 0 && playerKeys.every(k => players[k].ready === true);
         if (allReady && multi.isHost) {
             startMultiGameAgain();
@@ -1229,14 +1344,20 @@ function attachResultRoomWatcher() {
     // タイマー監視（10秒タイマーカウントダウン）
     multiWatch(`rooms/${multi.roomId}/retryTimerEnd`, (snapshot) => {
         const timerEnd = snapshot.val();
+        
+        // 【修正】既存のタイマーを必ずクリア
+        if (multi.retryIntervalId) {
+            window.clearInterval(multi.retryIntervalId);
+            multi.retryIntervalId = null;
+        }
+
         if (!timerEnd) {
-            // タイマー解除時
             const me = multi.lastPlayersData[multi.playerId];
             updateRetryButtonUI(me?.ready || false, 0);
             return;
         }
 
-        const intervalId = window.setInterval(async () => {
+        multi.retryIntervalId = window.setInterval(async () => {
             const now = Date.now();
             const remaining = Math.max(0, Math.ceil((timerEnd - now) / 1000));
             const me = multi.lastPlayersData[multi.playerId];
@@ -1247,21 +1368,28 @@ function attachResultRoomWatcher() {
                 updateRetryButtonUI(false, 0);
             }
 
-            // タイマーが0になった場合
             if (remaining <= 0) {
-                window.clearInterval(intervalId);
+                window.clearInterval(multi.retryIntervalId);
+                multi.retryIntervalId = null;
+
                 if (multi.isHost) {
                     const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
                     const players = playersSnap.val() || {};
                     
-                    // readyでないプレイヤーをルームから除外
+                    let kickedCount = 0;
                     for (const [pId, pData] of Object.entries(players)) {
                         if (!pData.ready) {
                             await remove(ref(db, `rooms/${multi.roomId}/players/${pId}`));
+                            kickedCount++;
                         }
                     }
 
-                    // 1人以上準備完了者が残っていればスタート
+                    if (kickedCount > 0) {
+                        await runTransaction(ref(db, `rooms/${multi.roomId}/playerCount`), (current) =>
+                            Math.max(0, (current || 1) - kickedCount)
+                        );
+                    }
+
                     const updatedSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
                     const updatedPlayers = updatedSnap.val() || {};
                     if (Object.keys(updatedPlayers).length > 0) {
@@ -1271,7 +1399,16 @@ function attachResultRoomWatcher() {
             }
         }, 200);
 
-        multi.listeners.push({ ref: null, callback: () => window.clearInterval(intervalId) });
+        // クリーンアップ用に関数を登録
+        multi.listeners.push({
+            ref: null,
+            callback: () => {
+                if (multi.retryIntervalId) {
+                    window.clearInterval(multi.retryIntervalId);
+                    multi.retryIntervalId = null;
+                }
+            }
+        });
     });
 }
 
@@ -1286,16 +1423,15 @@ multiResultEls.retryBtn.addEventListener("click", async () => {
     try {
         await set(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}/ready`), nextReadyState);
 
-        // 自分が最初の1人として「もう一度あそぶ」を押した場合、10秒タイマーを開始
         const timerSnap = await get(ref(db, `rooms/${multi.roomId}/retryTimerEnd`));
         if (nextReadyState && !timerSnap.val()) {
-            const endTime = Date.now() + 10000; // 10秒後
+            const endTime = Date.now() + 10000;
             await set(ref(db, `rooms/${multi.roomId}/retryTimerEnd`), endTime);
         } else if (!nextReadyState) {
-            // 全員がキャンセル状態になったかチェックし、誰もおらなければタイマーリセット
+            // 【修正】バグの原因だった未定義変数 pId を修正
             const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
             const players = playersSnap.val() || {};
-            const anyReady = Object.values(players).some(p => p.ready && pId !== multi.playerId);
+            const anyReady = Object.entries(players).some(([id, p]) => p.ready && id !== multi.playerId);
             if (!anyReady) {
                 await remove(ref(db, `rooms/${multi.roomId}/retryTimerEnd`));
             }
@@ -1305,7 +1441,6 @@ multiResultEls.retryBtn.addEventListener("click", async () => {
     }
 });
 
-// ゲーム再スタート処理
 async function startMultiGameAgain() {
     if (!multi.roomId) return;
     try {
@@ -1313,7 +1448,6 @@ async function startMultiGameAgain() {
         const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
         const players = playersSnap.val() || {};
 
-        // 全プレイヤーのスコアとready状態をリセット
         for (const pId of Object.keys(players)) {
             await set(ref(db, `rooms/${multi.roomId}/players/${pId}/score`), 0);
             await set(ref(db, `rooms/${multi.roomId}/players/${pId}/ready`), false);

@@ -705,10 +705,15 @@ function multiWatch(path, callback) {
     multi.listeners.push({ ref: r, callback });
 }
 
+// 【修正】コールバックの誤実行を防止し、安全にリスナーとタイマーを解除する
 function multiUnwatchAll() {
     multi.listeners.forEach(({ ref: r, callback }) => {
-        if (r) off(r, "value", callback);
-        if (typeof callback === "function") callback();
+        if (r) {
+            off(r, "value", callback);
+        } else if (typeof callback === "function") {
+            // ref が null の場合はクリーンアップ関数として実行
+            callback(); 
+        }
     });
     multi.listeners = [];
     if (multi.hostLoopTimeoutId) {
@@ -946,35 +951,33 @@ function renderRoomWaitPlayers(players) {
     });
 }
 
-// 【修正】離脱処理：リスナー解約を先に行うことで自分削除時のリスナー誤作動・フリーズを防ぎ、指定画面へ遷移
-async function leaveRoom(targetScreen = "multiSetup") {
+// 【修正】画面遷移の即時実行と、バックグラウンドでの離脱処理
+function leaveRoom(targetScreen = "multiSetup") {
     const rId = multi.roomId;
     const pId = multi.playerId;
 
-    // 1. まずリスナーを全て解約（自分自身の削除イベントに反応してフリーズするのを防ぐ）
+    // 1. リスナーを全て解約（通信エラーのクラッシュを防止済）
     multiUnwatchAll();
 
-    // 2. Firebaseから削除・更新
-    if (rId && pId) {
-        try {
-            await remove(ref(db, `rooms/${rId}/players/${pId}`));
-            await runTransaction(ref(db, `rooms/${rId}/playerCount`), (current) =>
-                Math.max((current || 1) - 1, 0)
-            );
-        } catch (err) {
-            console.warn("離脱処理中にエラーが発生しました:", err);
-        }
-    }
-
-    // 3. 内部状態をクリア
+    // 2. 内部状態をクリア
     multi.roomId = null;
     multi.playerId = null;
     multi.maxPlayers = null;
     multi.lastPlayersData = {};
     currentRoundId = null;
 
-    // 4. 画面を目的の画面へ戻す（待機画面から「やめる」なら multiSetup へ）
+    // 3. 画面を即座に遷移させる（これで「やめる」がすぐ効く）
     showScreen(targetScreen);
+
+    // 4. Firebaseからの削除・更新は裏で走らせる（画面の動きを止めない）
+    if (rId && pId) {
+        remove(ref(db, `rooms/${rId}/players/${pId}`)).catch((err) => {
+            console.warn("離脱処理中にエラーが発生しました:", err);
+        });
+        runTransaction(ref(db, `rooms/${rId}/playerCount`), (current) =>
+            Math.max((current || 1) - 1, 0)
+        ).catch(() => {});
+    }
 }
 
 roomWaitEls.leaveBtn.addEventListener("click", () => leaveRoom("multiSetup"));

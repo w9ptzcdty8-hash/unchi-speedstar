@@ -113,7 +113,9 @@ const screens = {
 
 function showScreen(key) {
     Object.values(screens).forEach((el) => el.classList.remove("is-active"));
-    screens[key].classList.add("is-active");
+    if (screens[key]) {
+        screens[key].classList.add("is-active");
+    }
 }
 
 // ========================================
@@ -693,7 +695,7 @@ let multi = {
     penaltyUntil: 0,
     penaltyAnimFrameId: null,
     hostLoopTimeoutId: null,
-    retryIntervalId: null, // 【修正】10秒タイマー専用のID管理
+    retryIntervalId: null,
     lastPlayersData: {}
 };
 
@@ -706,7 +708,7 @@ function multiWatch(path, callback) {
 function multiUnwatchAll() {
     multi.listeners.forEach(({ ref: r, callback }) => {
         if (r) off(r, "value", callback);
-        if (typeof callback === "function") callback(); // タイマー解除関数などの実行
+        if (typeof callback === "function") callback();
     });
     multi.listeners = [];
     if (multi.hostLoopTimeoutId) {
@@ -944,25 +946,38 @@ function renderRoomWaitPlayers(players) {
     });
 }
 
-roomWaitEls.leaveBtn.addEventListener("click", leaveRoom);
+// 【修正】離脱処理：リスナー解約を先に行うことで自分削除時のリスナー誤作動・フリーズを防ぎ、指定画面へ遷移
+async function leaveRoom(targetScreen = "multiSetup") {
+    const rId = multi.roomId;
+    const pId = multi.playerId;
 
-async function leaveRoom() {
-    if (multi.roomId && multi.playerId) {
+    // 1. まずリスナーを全て解約（自分自身の削除イベントに反応してフリーズするのを防ぐ）
+    multiUnwatchAll();
+
+    // 2. Firebaseから削除・更新
+    if (rId && pId) {
         try {
-            await remove(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}`));
-            await runTransaction(ref(db, `rooms/${multi.roomId}/playerCount`), (current) =>
+            await remove(ref(db, `rooms/${rId}/players/${pId}`));
+            await runTransaction(ref(db, `rooms/${rId}/playerCount`), (current) =>
                 Math.max((current || 1) - 1, 0)
             );
         } catch (err) {
-            console.warn(err);
+            console.warn("離脱処理中にエラーが発生しました:", err);
         }
     }
-    multiUnwatchAll();
+
+    // 3. 内部状態をクリア
     multi.roomId = null;
     multi.playerId = null;
     multi.maxPlayers = null;
-    showScreen("title");
+    multi.lastPlayersData = {};
+    currentRoundId = null;
+
+    // 4. 画面を目的の画面へ戻す（待機画面から「やめる」なら multiSetup へ）
+    showScreen(targetScreen);
 }
+
+roomWaitEls.leaveBtn.addEventListener("click", () => leaveRoom("multiSetup"));
 
 let currentRoundId = null;
 let currentRoundIsCorrectWord = false;
@@ -1319,7 +1334,6 @@ function updateRetryButtonUI(isReady, remainingSec) {
 }
 
 function attachResultRoomWatcher() {
-    // 【修正】古いリスナーを確実にクリーンアップしてから新しく登録
     multiUnwatchAll();
 
     // プレイヤー変更監視
@@ -1328,7 +1342,7 @@ function attachResultRoomWatcher() {
         const playerKeys = Object.keys(players);
 
         if (playerKeys.length === 0 || (playerKeys.length === 1 && playerKeys[0] !== multi.playerId)) {
-            leaveRoom();
+            leaveRoom("multiSetup");
             return;
         }
 
@@ -1345,7 +1359,6 @@ function attachResultRoomWatcher() {
     multiWatch(`rooms/${multi.roomId}/retryTimerEnd`, (snapshot) => {
         const timerEnd = snapshot.val();
         
-        // 【修正】既存のタイマーを必ずクリア
         if (multi.retryIntervalId) {
             window.clearInterval(multi.retryIntervalId);
             multi.retryIntervalId = null;
@@ -1399,7 +1412,6 @@ function attachResultRoomWatcher() {
             }
         }, 200);
 
-        // クリーンアップ用に関数を登録
         multi.listeners.push({
             ref: null,
             callback: () => {
@@ -1428,7 +1440,6 @@ multiResultEls.retryBtn.addEventListener("click", async () => {
             const endTime = Date.now() + 10000;
             await set(ref(db, `rooms/${multi.roomId}/retryTimerEnd`), endTime);
         } else if (!nextReadyState) {
-            // 【修正】バグの原因だった未定義変数 pId を修正
             const playersSnap = await get(ref(db, `rooms/${multi.roomId}/players`));
             const players = playersSnap.val() || {};
             const anyReady = Object.entries(players).some(([id, p]) => p.ready && id !== multi.playerId);
@@ -1459,23 +1470,7 @@ async function startMultiGameAgain() {
     }
 }
 
-multiResultEls.toTitleBtn.addEventListener("click", async () => {
-    if (multi.roomId && multi.playerId) {
-        try {
-            await remove(ref(db, `rooms/${multi.roomId}/players/${multi.playerId}`));
-            await runTransaction(ref(db, `rooms/${multi.roomId}/playerCount`), (current) =>
-                Math.max((current || 1) - 1, 0)
-            );
-        } catch (err) {}
-    }
-    multiUnwatchAll();
-    multi.roomId = null;
-    multi.playerId = null;
-    multi.maxPlayers = null;
-    multi.lastPlayersData = {};
-    currentRoundId = null;
-    showScreen("title");
-});
+multiResultEls.toTitleBtn.addEventListener("click", () => leaveRoom("title"));
 
 // ========================================
 // 初期化

@@ -121,6 +121,11 @@
             <p class="field-label">ルームID（このIDを友達に伝えてね）</p>
             <div class="room-id-display" id="room-id-display">------</div>
 
+            <div class="room-qr-container">
+                <div class="room-qr" id="room-qr"></div>
+                <p class="room-qr-caption">QRコードを読み取って参加</p>
+            </div>
+
             <div class="room-players" id="room-players"></div>
 
             <p class="waiting-text">人数がそろうと自動でスタートします…</p>
@@ -157,7 +162,8 @@
             <ol class="multi-result-ranking" id="multi-result-ranking"></ol>
 
             <div class="menu">
-                <button id="btn-multi-result-to-title" class="btn btn-main">タイトルへ</button>
+                <button id="btn-multi-retry" class="btn btn-main">もう一度あそぶ</button>
+                <button id="btn-multi-result-to-title" class="btn btn-sub-wide">タイトルへ</button>
             </div>
         </section>
 
@@ -198,6 +204,8 @@
         </div>
     </div>
 
+    <!-- QRコード生成用ライブラリ（davidshimjs/qrcodejs, MIT License, 依存関係なし） -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
     <script type="module" src="script.js"></script>
 </body>
 </html>

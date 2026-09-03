@@ -885,12 +885,25 @@ function enterRoomWaitScreen() {
     renderRoomQrCode(multi.roomId);
     showScreen("roomWait");
 
-    multiWatch(`rooms/${multi.roomId}/players`, (snapshot) => {
+    multiWatch(`rooms/${multi.roomId}/players`, async (snapshot) => {
         const players = snapshot.val() || {};
         multi.lastPlayersData = { ...players };
         renderRoomWaitPlayers(players);
         renderMultiScoreboard(multiPlayEls.scoreboard, players);
         checkAndUpdateHost(players);
+
+        // 【修正】定員に達した際の自動ゲーム開始処理をここに復元（1箇所に集約）
+        const count = Object.keys(players).length;
+        if (multi.maxPlayers && count >= multi.maxPlayers) {
+            try {
+                await runTransaction(ref(db, `rooms/${multi.roomId}/state`), (current) => {
+                    if (current === "waiting") return "playing";
+                    return;
+                });
+            } catch (err) {
+                console.warn("自動開始処理に失敗しました", err);
+            }
+        }
     });
 
     multiWatch(`rooms/${multi.roomId}/state`, (snapshot) => {
@@ -918,7 +931,7 @@ function checkAndUpdateHost(players) {
 }
 
 function watchAutoStart() {
-    // enterRoomWaitScreen 内で既に rooms/.../players を多重登録しないよう配慮
+    // enterRoomWaitScreen 内のリスナーに自動開始処理を統合済み
 }
 
 function renderRoomWaitPlayers(players) {
@@ -1312,13 +1325,10 @@ function updateRetryButtonUI(isReady, remainingSec) {
 }
 
 function attachResultRoomWatcher() {
-    // 【修正】2戦目移行時に既存リスナー全解除してしまう不具合を防ぎ、リザルト画面用の追加監視のみを行う
-    // プレイヤー変更監視（他プレイヤー全員の離脱チェック・全員Readyチェック）
     multiWatch(`rooms/${multi.roomId}/players`, async (snapshot) => {
         const players = snapshot.val() || {};
         const playerKeys = Object.keys(players);
 
-        // 【修正】部屋に残っているのが自分1人だけ（＝他全員がタイトルに戻った）場合、自分も自動退室する
         if (playerKeys.length === 0 || (playerKeys.length === 1 && playerKeys[0] === multi.playerId)) {
             leaveRoom("multiSetup");
             return;
@@ -1333,7 +1343,6 @@ function attachResultRoomWatcher() {
         }
     });
 
-    // タイマー監視（10秒タイマーカウントダウン）
     multiWatch(`rooms/${multi.roomId}/retryTimerEnd`, (snapshot) => {
         const timerEnd = snapshot.val();
         
@@ -1402,7 +1411,6 @@ function attachResultRoomWatcher() {
     });
 }
 
-// 「もう一度あそぶ」/「キャンセル」トグルイベント
 multiResultEls.retryBtn.addEventListener("click", async () => {
     if (!multi.roomId || !multi.playerId) return;
 

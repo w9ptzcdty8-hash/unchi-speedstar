@@ -705,13 +705,11 @@ function multiWatch(path, callback) {
     multi.listeners.push({ ref: r, callback });
 }
 
-// 【修正】コールバックの誤実行を防止し、安全にリスナーとタイマーを解除する
 function multiUnwatchAll() {
     multi.listeners.forEach(({ ref: r, callback }) => {
         if (r) {
             off(r, "value", callback);
         } else if (typeof callback === "function") {
-            // ref が null の場合はクリーンアップ関数として実行
             callback(); 
         }
     });
@@ -920,25 +918,7 @@ function checkAndUpdateHost(players) {
 }
 
 function watchAutoStart() {
-    multiWatch(`rooms/${multi.roomId}/players`, async (snapshot) => {
-        const players = snapshot.val() || {};
-        const count = Object.keys(players).length;
-
-        if (!multi.maxPlayers || count < multi.maxPlayers) return;
-
-        try {
-            const result = await runTransaction(ref(db, `rooms/${multi.roomId}/state`), (current) => {
-                if (current === "waiting") return "playing";
-                return;
-            });
-
-            if (result.committed) {
-                // 自動開始トリガー
-            }
-        } catch (err) {
-            console.warn("自動開始処理に失敗しました", err);
-        }
-    });
+    // enterRoomWaitScreen 内で既に rooms/.../players を多重登録しないよう配慮
 }
 
 function renderRoomWaitPlayers(players) {
@@ -951,25 +931,20 @@ function renderRoomWaitPlayers(players) {
     });
 }
 
-// 【修正】画面遷移の即時実行と、バックグラウンドでの離脱処理
 function leaveRoom(targetScreen = "multiSetup") {
     const rId = multi.roomId;
     const pId = multi.playerId;
 
-    // 1. リスナーを全て解約（通信エラーのクラッシュを防止済）
     multiUnwatchAll();
 
-    // 2. 内部状態をクリア
     multi.roomId = null;
     multi.playerId = null;
     multi.maxPlayers = null;
     multi.lastPlayersData = {};
     currentRoundId = null;
 
-    // 3. 画面を即座に遷移させる（これで「やめる」がすぐ効く）
     showScreen(targetScreen);
 
-    // 4. Firebaseからの削除・更新は裏で走らせる（画面の動きを止めない）
     if (rId && pId) {
         remove(ref(db, `rooms/${rId}/players/${pId}`)).catch((err) => {
             console.warn("離脱処理中にエラーが発生しました:", err);
@@ -1337,14 +1312,14 @@ function updateRetryButtonUI(isReady, remainingSec) {
 }
 
 function attachResultRoomWatcher() {
-    multiUnwatchAll();
-
-    // プレイヤー変更監視
+    // 【修正】2戦目移行時に既存リスナー全解除してしまう不具合を防ぎ、リザルト画面用の追加監視のみを行う
+    // プレイヤー変更監視（他プレイヤー全員の離脱チェック・全員Readyチェック）
     multiWatch(`rooms/${multi.roomId}/players`, async (snapshot) => {
         const players = snapshot.val() || {};
         const playerKeys = Object.keys(players);
 
-        if (playerKeys.length === 0 || (playerKeys.length === 1 && playerKeys[0] !== multi.playerId)) {
+        // 【修正】部屋に残っているのが自分1人だけ（＝他全員がタイトルに戻った）場合、自分も自動退室する
+        if (playerKeys.length === 0 || (playerKeys.length === 1 && playerKeys[0] === multi.playerId)) {
             leaveRoom("multiSetup");
             return;
         }

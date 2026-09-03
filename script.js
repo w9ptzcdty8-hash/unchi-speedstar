@@ -146,7 +146,7 @@ function formatSeconds(ms) {
 
 function resetFeedback(feedbackBadgeEl, stageEl) {
     if (feedbackBadgeEl) {
-        feedbackBadgeEl.classList.remove("badge-good", "badge-bad");
+        feedbackBadgeEl.classList.remove("badge-good", "badge-bad", "badge-pending");
         feedbackBadgeEl.textContent = "";
     }
     if (stageEl) {
@@ -892,7 +892,6 @@ function enterRoomWaitScreen() {
         renderMultiScoreboard(multiPlayEls.scoreboard, players);
         checkAndUpdateHost(players);
 
-        // 【修正】定員に達した際の自動ゲーム開始処理をここに復元（1箇所に集約）
         const count = Object.keys(players).length;
         if (multi.maxPlayers && count >= multi.maxPlayers) {
             try {
@@ -931,7 +930,6 @@ function checkAndUpdateHost(players) {
 }
 
 function watchAutoStart() {
-    // enterRoomWaitScreen 内のリスナーに自動開始処理を統合済み
 }
 
 function renderRoomWaitPlayers(players) {
@@ -1198,6 +1196,9 @@ function handleRoundUpdate(round) {
     currentRoundIsCorrectWord = !!round.isCorrect;
     hasSubmittedTapForWord = false;
     wordShownAtLocal = performance.now();
+
+    // 【修正】新しい単語が表示される際、過去の判定（「⏳ はんてい中…」含む）を確実に消去
+    resetFeedback(multiPlayEls.feedback, multiPlayEls.stage);
 
     const displayWord = round.word || CORRECT_WORD;
 
